@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 APP_TITLE = "Past Paper 管理器 · 多选UI"
-WINDOW_MIN_W, WINDOW_MIN_H = 980, 480
+WINDOW_MIN_W, WINDOW_MIN_H = 980, 520
 
 YEARS = [str(y) for y in range(2018, 2026)]
 SEASONS = ["Winter", "Spring", "Summer"]
@@ -71,6 +71,7 @@ PAPER_TOPICS = {
     ],
 }
 
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -82,8 +83,11 @@ class App(tk.Tk):
         self.season_vars: dict[str, tk.BooleanVar] = {}
         self.subject_var = tk.StringVar(value=SUBJECTS[0])
 
+        # topic 勾选变量
+        self.topic_vars: dict[str, tk.BooleanVar] = {}
+
         self._build_ui()
-        self._refresh_topics()
+        self._on_subject_changed()  # 初始化时刷新
 
     # =============== UI ===============
     def _build_ui(self):
@@ -111,11 +115,9 @@ class App(tk.Tk):
         self.lbl_subject_full = ttk.Label(root, text="", foreground="#555")
         self.lbl_subject_full.pack(anchor="w", pady=(6, 0))
 
-        # 行3：Topic（随“考试科目”变化，可多选）
-        row3 = ttk.LabelFrame(root, text="Topic（可多选，随考试科目变化）", padding=(10, 8))
-        row3.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
-        self.lb_topics = tk.Listbox(row3, height=12, exportselection=False, selectmode=tk.MULTIPLE)
-        self.lb_topics.pack(fill=tk.BOTH, expand=True)
+        # 行3：Topic（随科目变化，可多选）
+        self.topic_box = ttk.LabelFrame(root, text="Topic（可多选，随考试科目变化）", padding=(10, 8))
+        self.topic_box.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
         # 行4：按钮
         row4 = ttk.Frame(root)
@@ -138,24 +140,44 @@ class App(tk.Tk):
         row = ttk.Frame(parent)
         row.pack(fill=tk.X)
         for text in options:
-            # 单选按钮显示短代号（pure1/pure2/...）
             rb = ttk.Radiobutton(row, text=text, value=text, variable=var, command=command)
             rb.pack(side=tk.LEFT, padx=(0, 10))
 
     # =============== 行为 ===============
     def _on_subject_changed(self):
-        # 更新科目全名提示 + topics
+        """更新科目提示和 topics 区域"""
         short = self.subject_var.get()
         full = SUBJECT_TITLES.get(short, short)
         self.lbl_subject_full.config(text=f"当前科目：{full}")
-        self._refresh_topics()
+        self._refresh_topics_checkbuttons()
 
-    def _refresh_topics(self):
+    def _refresh_topics_checkbuttons(self):
+        """根据科目重建 topics 勾选框"""
+        for child in self.topic_box.winfo_children():
+            child.destroy()
+        self.topic_vars.clear()
+
         subject_key = self.subject_var.get()
         topics = PAPER_TOPICS.get(subject_key, [])
-        self.lb_topics.delete(0, tk.END)
-        for t in topics:
-            self.lb_topics.insert(tk.END, t)
+
+        if not topics:
+            ttk.Label(self.topic_box, text="（无可选 Topic）", foreground="#888").pack(anchor="w", padx=8, pady=8)
+            return
+
+        # 平铺小方框
+        cols = 2  # 改为 1/3 也行
+        for i, t in enumerate(topics):
+            var = tk.BooleanVar(value=False)
+            self.topic_vars[t] = var
+            cb = ttk.Checkbutton(self.topic_box, text=t, variable=var)
+            r, c = divmod(i, cols)
+            cb.grid(row=r, column=c, sticky="w", padx=6, pady=4)
+
+        for c in range(cols):
+            self.topic_box.grid_columnconfigure(c, weight=1)
+
+    def _get_selected_topics(self) -> list[str]:
+        return [name for name, var in self.topic_vars.items() if var.get()]
 
     def _on_import_pdf(self):
         filedialog.askopenfilenames(title="选择 PDF 文件", filetypes=[("PDF 文件", "*.pdf")])
@@ -166,7 +188,7 @@ class App(tk.Tk):
         seasons = [s for s, v in self.season_vars.items() if v.get()]
         subject_key = self.subject_var.get()
         subject_full = SUBJECT_TITLES.get(subject_key, subject_key)
-        topics = [self.lb_topics.get(i) for i in self.lb_topics.curselection()]
+        topics = self._get_selected_topics()
 
         messagebox.showinfo(
             "生成 Quiz（占位）",
@@ -175,6 +197,7 @@ class App(tk.Tk):
             f"Subject: {subject_key}  ·  {subject_full}\n"
             "Topic(s): " + (", ".join(topics) if topics else "未选")
         )
+
 
 if __name__ == "__main__":
     App().mainloop()

@@ -4,7 +4,8 @@
 # 变更点：
 # - 布局：题号 -> 页面导航 -> Topic 多选 -> 操作
 # - Topic 为可多选的 Checkbutton；确认后会重置勾选
-# - 确认后不预览；整页入库（内存）
+# - “题号 -1 并确认”：会自动套用“上一页已确认时勾选的 topics”
+# - 不预览；整页入库（内存）
 # - 导出 PDF 文件名附带题号与 Topic（多个则用下划线拼接）
 
 import os
@@ -74,7 +75,7 @@ class PageScreener(tk.Tk):
     逐页预览（整页）+ 人工题号标注 + topics 多选：
     - 布局：题号 -> 页面导航 -> Topic 多选 -> 操作
     - “确认（保存到内存）”直接入库，不预览；随后重置 topic 勾选
-    - 新增“题号 -1 并确认”
+    - “题号 -1 并确认”：自动套用上一页已确认时的 topics 勾选
     - 不落地中间PNG，退出后合并生成PDF；文件名包含题号与Topic
     """
     def __init__(self):
@@ -85,7 +86,7 @@ class PageScreener(tk.Tk):
         self.pdf: Optional[pdfplumber.PDF] = None
         self.input_pdf_path: Optional[str] = None
         self.input_pdf_stem: Optional[str] = None
-        self.page_images: List[tuple[int, Image.Image]] = []  # [(page_index, PIL.Image)]
+        self.page_images: List[tuple[int, Image.Image]] = []  # [(page_index_in_pdf, PIL.Image)]
         self.idx = 0
         self.qnum = 1
 
@@ -93,6 +94,10 @@ class PageScreener(tk.Tk):
         self.collected: Dict[str, List[Image.Image]] = defaultdict(list)
         # 每题的 topics：{'Q7': ['Functions', 'Series']}
         self.q_topics: Dict[str, List[str]] = {}
+
+        # —— 新增：记录“每一页在确认时”选择的 topics，用于 -1 并确认时复用
+        # 这里的 key 用界面序号 self.idx（从 0 起，对应 START_PAGE_INDEX 后的第几页）
+        self.page_topics_selected: Dict[int, List[str]] = {}
 
         # 当前文档的 topic 候选（来自文件名推断）
         self.meta: Optional[Dict[str, str]] = None
@@ -177,6 +182,7 @@ class PageScreener(tk.Tk):
             self.var_q.set(str(self.qnum))
             self.collected.clear()
             self.q_topics.clear()
+            self.page_topics_selected.clear()
 
             # 解析文件名 -> 刷新 topics（checkbox）
             self.meta = ts_parse_filename(fname) if ts_parse_filename else None
@@ -238,6 +244,15 @@ class PageScreener(tk.Tk):
         for var in self.topic_vars.values():
             var.set(False)
 
+    def _set_topic_checks(self, selected_names: List[str]):
+        """按给定列表勾选 topics（用于 -1 并确认时复用上一页设置）"""
+        # 先全部清空
+        self._reset_topic_checks()
+        name_set = set(selected_names or [])
+        for name, var in self.topic_vars.items():
+            if name in name_set:
+                var.set(True)
+
     # ---------- 渲染 ----------
     def _render_current(self):
         if not self.page_images:
@@ -270,7 +285,7 @@ class PageScreener(tk.Tk):
             return None
 
     def _save_current_to_memory(self, q: int):
-        """把当前页图像存入内存的题号队列；记录 topics；随后重置勾选。"""
+        """把当前页图像存入内存；记录 topics；随后重置勾选。"""
         if not self.page_images:
             return
         qid = f"Q{q}"
@@ -278,7 +293,10 @@ class PageScreener(tk.Tk):
         # 保存图像副本（避免后续渲染影响）
         self.collected[qid].append(to_rgb(pil_img.copy()))
         # 记录/更新 topics（以当前多选为准）
-        self.q_topics[qid] = self._current_topic_selection()
+        topics_now = self._current_topic_selection()
+        self.q_topics[qid] = topics_now
+        # —— 记下“本页”的 topics，供 -1 并确认时复用
+        self.page_topics_selected[self.idx] = topics_now[:]
         # —— 确认后重置勾选
         self._reset_topic_checks()
 
@@ -293,13 +311,24 @@ class PageScreener(tk.Tk):
         self.on_next()
 
     def on_confirm_minus_one(self):
-        """先题号 -1（不少于 1），再把当前页保存为该题号并跳到下一页。"""
+        """
+        先题号 -1（不少于 1），再把当前页保存为该题号并跳到下一页。
+        新增：保存前，自动套用“上一页确认时的 topics 勾选”。
+        """
         q = self._parse_q()
         if q is None:
             return
         q = max(1, q - 1)
         self.var_q.set(str(q))
+
+        # —— 关键：自动选择“上一页已确认时的 topics”
+        prev_idx = self.idx - 1
+        if prev_idx >= 0 and prev_idx in self.page_topics_selected:
+            self._set_topic_checks(self.page_topics_selected[prev_idx])
+
+        # 保存当前页（会读取上面设好的勾选）
         self._save_current_to_memory(q)
+
         # 保存后仍遵循“确认”的行为：题号 +1 并下一页
         self.qnum = q + 1
         self.var_q.set(str(self.qnum))
