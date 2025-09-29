@@ -1,12 +1,12 @@
-# quiz_generator.py
+# read_pdf_questions.py
 # 目标：仅输出 data/output/<PDF名>/ 下的合并PDF，不在磁盘保留中间题图
 #
-# 变更点：
 # - 布局：题号 -> 页面导航 -> Topic 多选 -> 操作
 # - Topic 为可多选的 Checkbutton；确认后会重置勾选
-# - “题号 -1 并确认”：会自动套用“上一页已确认时勾选的 topics”
+# - “题号 -1 并确认”：自动套用“上一页已确认时勾选的 topics”
 # - 不预览；整页入库（内存）
 # - 导出 PDF 文件名附带题号与 Topic（多个则用下划线拼接）
+# - 新增：支持 initial_pdf / --file 直接加载，不再二次弹“选择PDF”
 
 import os
 import re
@@ -28,7 +28,7 @@ except Exception:
 
 # ========= 配置 =========
 START_PAGE_INDEX = 1        # 从第2页开始（0=第一页，1=第二页）
-RENDER_DPI = 300            # 左侧预览清晰度（决定导出图像质量；300 常用，400/600 更清晰但更占内存）
+RENDER_DPI = 300            # 左侧预览清晰度（300 常用）
 OUTPUT_ROOT = os.path.join("data", "output")   # 顶层输出目录
 
 def to_rgb(img: Image.Image) -> Image.Image:
@@ -77,8 +77,9 @@ class PageScreener(tk.Tk):
     - “确认（保存到内存）”直接入库，不预览；随后重置 topic 勾选
     - “题号 -1 并确认”：自动套用上一页已确认时的 topics 勾选
     - 不落地中间PNG，退出后合并生成PDF；文件名包含题号与Topic
+    - 新增：initial_pdf 参数可直接加载，不再二次弹选择框
     """
-    def __init__(self):
+    def __init__(self, initial_pdf: str | None = None):
         super().__init__()
         self.title("逐页截图 · 手工标号（整页 · 多选Topic）")
         self.minsize(1000, 760)
@@ -95,17 +96,39 @@ class PageScreener(tk.Tk):
         # 每题的 topics：{'Q7': ['Functions', 'Series']}
         self.q_topics: Dict[str, List[str]] = {}
 
-        # —— 新增：记录“每一页在确认时”选择的 topics，用于 -1 并确认时复用
-        # 这里的 key 用界面序号 self.idx（从 0 起，对应 START_PAGE_INDEX 后的第几页）
+        # —— 记录“每一页确认时”的 topics（用于 -1 并确认时复用）
         self.page_topics_selected: Dict[int, List[str]] = {}
 
         # 当前文档的 topic 候选（来自文件名推断）
         self.meta: Optional[Dict[str, str]] = None
-        self.topic_vars: Dict[str, tk.BooleanVar] = {}  # 主题 -> 选中布尔
-        self.topic_box: Optional[ttk.LabelFrame] = None  # 容器（方便刷新时清空）
+        self.topic_vars: Dict[str, tk.BooleanVar] = {}   # 主题 -> 选中布尔
+        self.topic_box: Optional[ttk.LabelFrame] = None  # 容器（刷新时清空）
 
         self._build_ui()
-        self._choose_pdf()
+
+        # == 载入 PDF ==
+        if initial_pdf:
+            try:
+                self._load_pdf(initial_pdf)
+                fname = os.path.basename(initial_pdf)
+                self.lbl_info.config(
+                    text=f"文件：{fname}  |  可处理页数：{len(self.page_images)}（从第2页起）"
+                )
+                self.idx = 0
+                self.qnum = 1
+                self.var_q.set(str(self.qnum))
+                self.collected.clear()
+                self.q_topics.clear()
+                self.page_topics_selected.clear()
+
+                self.meta = ts_parse_filename(fname) if ts_parse_filename else None
+                self._refresh_topic_checkboxes()
+                self._render_current()
+            except Exception:
+                # 失败则回退到手动选择
+                self._choose_pdf()
+        else:
+            self._choose_pdf()
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -139,17 +162,16 @@ class PageScreener(tk.Tk):
         self.ent_q = ttk.Entry(qrow, textvariable=self.var_q, width=6, justify="center")
         self.ent_q.pack(side=tk.LEFT, padx=6)
 
-        # 页面导航（放在题号和操作中间）
+        # 页面导航
         box_nav = ttk.LabelFrame(right, text="页面导航")
         box_nav.pack(fill=tk.X, pady=(8, 0))
         nav = ttk.Frame(box_nav); nav.pack(fill=tk.X, padx=8, pady=8)
         ttk.Button(nav, text="上一页", command=self.on_prev).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 4))
         ttk.Button(nav, text="下一页", command=self.on_next).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(4, 0))
 
-        # Topic 多选（全部展示的小方框）
+        # Topic 多选
         self.topic_box = ttk.LabelFrame(right, text="Topic（可多选）")
         self.topic_box.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
-        # 载入PDF后刷新
 
         # 操作
         box_btn = ttk.LabelFrame(right, text="操作")
@@ -210,7 +232,6 @@ class PageScreener(tk.Tk):
 
     # ---------- Topics（checklist） ----------
     def _refresh_topic_checkboxes(self):
-        # 清空旧的
         for child in self.topic_box.winfo_children():
             child.destroy()
         self.topic_vars.clear()
@@ -246,7 +267,6 @@ class PageScreener(tk.Tk):
 
     def _set_topic_checks(self, selected_names: List[str]):
         """按给定列表勾选 topics（用于 -1 并确认时复用上一页设置）"""
-        # 先全部清空
         self._reset_topic_checks()
         name_set = set(selected_names or [])
         for name, var in self.topic_vars.items():
@@ -290,14 +310,10 @@ class PageScreener(tk.Tk):
             return
         qid = f"Q{q}"
         _page_index, pil_img = self.page_images[self.idx]
-        # 保存图像副本（避免后续渲染影响）
         self.collected[qid].append(to_rgb(pil_img.copy()))
-        # 记录/更新 topics（以当前多选为准）
         topics_now = self._current_topic_selection()
         self.q_topics[qid] = topics_now
-        # —— 记下“本页”的 topics，供 -1 并确认时复用
         self.page_topics_selected[self.idx] = topics_now[:]
-        # —— 确认后重置勾选
         self._reset_topic_checks()
 
     def on_confirm(self):
@@ -305,31 +321,22 @@ class PageScreener(tk.Tk):
         if q is None:
             return
         self._save_current_to_memory(q)
-        # 自动 +1 并跳到下一页；若跨页同一题，可用“题号 -1 并确认”
         self.qnum = q + 1
         self.var_q.set(str(self.qnum))
         self.on_next()
 
     def on_confirm_minus_one(self):
-        """
-        先题号 -1（不少于 1），再把当前页保存为该题号并跳到下一页。
-        新增：保存前，自动套用“上一页确认时的 topics 勾选”。
-        """
         q = self._parse_q()
         if q is None:
             return
         q = max(1, q - 1)
         self.var_q.set(str(q))
 
-        # —— 关键：自动选择“上一页已确认时的 topics”
         prev_idx = self.idx - 1
         if prev_idx >= 0 and prev_idx in self.page_topics_selected:
             self._set_topic_checks(self.page_topics_selected[prev_idx])
 
-        # 保存当前页（会读取上面设好的勾选）
         self._save_current_to_memory(q)
-
-        # 保存后仍遵循“确认”的行为：题号 +1 并下一页
         self.qnum = q + 1
         self.var_q.set(str(self.qnum))
         self.on_next()
@@ -355,7 +362,6 @@ class PageScreener(tk.Tk):
             if messagebox.askyesno("确认", "还没有保存任何题目页。是否直接退出？"):
                 self.destroy()
             return
-        # 汇总提示
         lines = []
         for qid in sorted(self.collected.keys(), key=lambda s: int(s[1:])):
             topics = self.q_topics.get(qid, [])
@@ -366,22 +372,32 @@ class PageScreener(tk.Tk):
 
 # ========= 主入口 =========
 if __name__ == "__main__":
-    app = PageScreener()
+    """
+    支持从命令行传入 --file 直接加载某个 PDF。
+    若未传 --file，保持原先“选择PDF”的流程。
+    窗口关闭后，把内存里的题图合并导出到 data/output/<stem>/...
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--file", default=None, help="要直接加载的题目 PDF 路径")
+    args = parser.parse_args()
+
+    app = PageScreener(initial_pdf=args.file)
     app.mainloop()
 
-    # 窗口关闭后，把内存中的题图合并成 PDF
-    if getattr(app, "collected", None) and app.input_pdf_stem:
-        pdf_stem = app.input_pdf_stem
-        dest_dir = os.path.join(OUTPUT_ROOT, pdf_stem)
+    # 退出后合并导出
+    if getattr(app, "collected", None) and getattr(app, "input_pdf_stem", None):
+        stem = app.input_pdf_stem
+        dest_dir = os.path.join(OUTPUT_ROOT, stem)
         os.makedirs(dest_dir, exist_ok=True)
 
-        print(f"开始生成合并PDF → 输出目录：{os.path.abspath(dest_dir)}")
         for qid in sorted(app.collected.keys(), key=lambda s: int(s[1:])):
             imgs = app.collected[qid]
             topics_for_q = app.q_topics.get(qid, [])
-            out = save_multipage_pdf(pdf_stem, qid, imgs, dest_dir, topics_for_q)
+            out = save_multipage_pdf(stem, qid, imgs, dest_dir, topics_for_q)
             if out:
                 print(f"[OK] {qid} -> {out}")
-        print("全部生成完成。")
+        print(f"全部生成完成 → {dest_dir}")
     else:
         print("未收集到任何题图，未生成PDF。")

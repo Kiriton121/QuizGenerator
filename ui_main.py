@@ -1,75 +1,55 @@
+# ui_main.py
+import sys
+import subprocess
+import traceback
+from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+# 从 topics.py 动态获取卷别与 topics
+from topics import list_components, get_topics
+# 生成 Quiz/答案的大合并逻辑
+from quiz_pair import build_quiz_and_answers
+
 
 APP_TITLE = "Past Paper 管理器 · 多选UI"
 WINDOW_MIN_W, WINDOW_MIN_H = 980, 520
 
+# 年份 / 季节（与 quiz_pair 一致）
 YEARS = [str(y) for y in range(2018, 2026)]
 SEASONS = ["Winter", "Spring", "Summer"]
 
-# ---- 科目（单选，用短代号）----
-SUBJECTS = ["pure1", "pure2", "pure3", "M1", "S1"]
+# 科目代码（你的 topics.py 里定义的是 9709）
+SUBJECT_CODE = "9709"
 
-# 短代号 -> 全名（用于显示/提示）
-SUBJECT_TITLES = {
-    "pure1": "Pure Mathematics 1 (P1)",
-    "pure2": "Pure Mathematics 2 (P2)",
-    "pure3": "Pure Mathematics 3 (P3)",
-    "M1":    "Mechanics (M1)",
-    "S1":    "Probability & Statistics 1 (S1)",
-}
+# 从 topics.py 读出卷别（component）及其标题
+COMPONENTS = list_components(SUBJECT_CODE)             # [{'component':'1','title':'Pure Mathematics 1 (P1)'}, ...]
+SUBJECTS = [c["component"] for c in COMPONENTS]        # ['1','2','3','4','5']
+SUBJECT_TITLES = {c["component"]: c["title"] for c in COMPONENTS}
 
-# 短代号 -> topics 列表（顺序即显示顺序）
-PAPER_TOPICS = {
-    "pure1": [
-        "Quadratics",
-        "Functions",
-        "Coordinate geometry",
-        "Circular measure",
-        "Trigonometry",
-        "Series",
-        "Differentiation",
-        "Integration",
-    ],
-    "pure2": [
-        "Algebra",
-        "Logarithmic and exponential functions",
-        "Trigonometry",
-        "Differentiation",
-        "Integration",
-        "Numerical methods",
-    ],
-    "pure3": [
-        "Algebra & functions",
-        "Logarithmic and exponential functions",
-        "Trigonometry",
-        "Differentiation",
-        "Integration",
-        "Numerical solution of equations",
-        "Vectors in 2D/3D",
-        "Differential equations",
-        "Complex numbers",
-    ],
-    "M1": [
-        "Forces and equilibrium",
-        "Kinematics of motion in a straight line",
-        "Energy, work and power",
-        "Momentum and impulse",
-        "Motion of a projectile",
-        "Uniform circular motion",
-        "Centres of mass",
-        "Hooke’s law, elastic strings and springs",
-    ],
-    "S1": [
-        "Representation of data",
-        "Permutations and combinations",
-        "Probability",
-        "Discrete random variables",
-        "The normal distribution",
-        "Sampling and estimation",
-        "Hypothesis testing",
-    ],
-}
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def _guess_kind_by_name(filename: str) -> str | None:
+    """根据文件名判断是题目(qp)还是答案(ms)。"""
+    n = filename.lower()
+    if "_qp_" in n:
+        return "qp"
+    if "_ms_" in n:
+        return "ms"
+    return None
+
+
+def _launch_tool(kind: str, pdf_path: str):
+    """用当前解释器启动对应脚本，并把 --file 传过去。"""
+    script = BASE_DIR / ("read_pdf_questions.py" if kind == "qp" else "read_pdf_answers.py")
+    if not script.exists():
+        messagebox.showerror("错误", f"找不到脚本：{script}")
+        return
+    try:
+        subprocess.Popen([sys.executable, str(script), "--file", pdf_path])
+    except Exception as e:
+        messagebox.showerror("启动失败", f"无法启动 {script.name}：\n{e}")
 
 
 class App(tk.Tk):
@@ -81,9 +61,10 @@ class App(tk.Tk):
         # 状态变量
         self.year_vars: dict[str, tk.BooleanVar] = {}
         self.season_vars: dict[str, tk.BooleanVar] = {}
-        self.subject_var = tk.StringVar(value=SUBJECTS[0])
+        # 直接存“卷别数字”作为 value（'1'/'2'/...）
+        self.subject_var = tk.StringVar(value=(SUBJECTS[0] if SUBJECTS else ""))
 
-        # topic 勾选变量
+        # topic 勾选变量（随科目变化）
         self.topic_vars: dict[str, tk.BooleanVar] = {}
 
         self._build_ui()
@@ -109,7 +90,14 @@ class App(tk.Tk):
 
         subject_box = ttk.LabelFrame(row2, text="考试科目（单选）", padding=(10, 8))
         subject_box.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self._make_radio_row(subject_box, SUBJECTS, self.subject_var, command=self._on_subject_changed)
+
+        # 单选：显示标题，value 为卷别数字
+        self._make_radio_row_pairs(
+            subject_box,
+            [(c["component"], c["title"]) for c in COMPONENTS],
+            self.subject_var,
+            command=self._on_subject_changed
+        )
 
         # 科目全名提示
         self.lbl_subject_full = ttk.Label(root, text="", foreground="#555")
@@ -135,68 +123,111 @@ class App(tk.Tk):
             cb = ttk.Checkbutton(row, text=text, variable=var)
             cb.pack(side=tk.LEFT, padx=(0, 10))
 
-    # —— 工具：一行横向 Radiobutton 组（单选）
-    def _make_radio_row(self, parent: ttk.Frame, options: list[str], var: tk.StringVar, command=None):
+    # —— 工具：一行横向 Radiobutton 组（value/label）
+    def _make_radio_row_pairs(self, parent: ttk.Frame, options: list[tuple[str, str]], var: tk.StringVar, command=None):
         row = ttk.Frame(parent)
         row.pack(fill=tk.X)
-        for text in options:
-            rb = ttk.Radiobutton(row, text=text, value=text, variable=var, command=command)
+        for value, label in options:
+            rb = ttk.Radiobutton(row, text=label, value=value, variable=var, command=command)
             rb.pack(side=tk.LEFT, padx=(0, 10))
 
     # =============== 行为 ===============
     def _on_subject_changed(self):
         """更新科目提示和 topics 区域"""
-        short = self.subject_var.get()
-        full = SUBJECT_TITLES.get(short, short)
-        self.lbl_subject_full.config(text=f"当前科目：{full}")
+        comp_no = self.subject_var.get()                   # '1' / '2' / ...
+        full = SUBJECT_TITLES.get(comp_no, comp_no)
+        self.lbl_subject_full.config(text=f"当前科目： {full}")
         self._refresh_topics_checkbuttons()
 
     def _refresh_topics_checkbuttons(self):
-        """根据科目重建 topics 勾选框"""
+        """根据科目重建 topics 勾选框（来自 topics.py）"""
         for child in self.topic_box.winfo_children():
             child.destroy()
         self.topic_vars.clear()
 
-        subject_key = self.subject_var.get()
-        topics = PAPER_TOPICS.get(subject_key, [])
+        comp_no = self.subject_var.get()
+        topics = [t["name"] for t in (get_topics(SUBJECT_CODE, comp_no) or [])]
 
         if not topics:
-            ttk.Label(self.topic_box, text="（无可选 Topic）", foreground="#888").pack(anchor="w", padx=8, pady=8)
+            ttk.Label(self.topic_box, text="（无可选 Topic 或未解析到）", foreground="#888").pack(anchor="w", padx=8, pady=8)
             return
 
         # 平铺小方框
-        cols = 2  # 改为 1/3 也行
+        cols = 2  # 可调整列数
+        grid = ttk.Frame(self.topic_box)
+        grid.pack(fill=tk.BOTH, expand=True)
         for i, t in enumerate(topics):
             var = tk.BooleanVar(value=False)
             self.topic_vars[t] = var
-            cb = ttk.Checkbutton(self.topic_box, text=t, variable=var)
+            cb = ttk.Checkbutton(grid, text=t, variable=var)
             r, c = divmod(i, cols)
             cb.grid(row=r, column=c, sticky="w", padx=6, pady=4)
-
         for c in range(cols):
-            self.topic_box.grid_columnconfigure(c, weight=1)
+            grid.grid_columnconfigure(c, weight=1)
 
     def _get_selected_topics(self) -> list[str]:
         return [name for name, var in self.topic_vars.items() if var.get()]
 
     def _on_import_pdf(self):
-        filedialog.askopenfilenames(title="选择 PDF 文件", filetypes=[("PDF 文件", "*.pdf")])
-        messagebox.showinfo("提示", "当前为 UI 原型：仅选择文件，不做任何处理。")
+        paths = filedialog.askopenfilenames(
+            title="选择 PDF 文件（可多选）",
+            filetypes=[("PDF 文件", "*.pdf")]
+        )
+        if not paths:
+            return
+
+        for p in paths:
+            p = str(p)
+            kind = _guess_kind_by_name(Path(p).name)
+            if kind is None:
+                # 文件名无法直接判断时，给一次手动选择
+                is_qp = messagebox.askyesno(
+                    "无法判断类型",
+                    f"无法从文件名识别是题目(qp)还是答案(ms)：\n\n{p}\n\n"
+                    "选择“是”按题目(qp)打开；“否”按答案(ms)打开。"
+                )
+                kind = "qp" if is_qp else "ms"
+            _launch_tool(kind, p)
 
     def _on_generate_quiz(self):
-        years = [y for y, v in self.year_vars.items() if v.get()]
-        seasons = [s for s, v in self.season_vars.items() if v.get()]
-        subject_key = self.subject_var.get()
-        subject_full = SUBJECT_TITLES.get(subject_key, subject_key)
-        topics = self._get_selected_topics()
+        try:
+            # 1) 取 UI 选择
+            years   = [y for y, v in self.year_vars.items()   if v.get()]
+            seasons = [s for s, v in self.season_vars.items() if v.get()]
+            comp_no = self.subject_var.get()                  # 直接就是 '1'/'2'/...
+            topics  = self._get_selected_topics()
 
-        messagebox.showinfo(
-            "生成 Quiz（占位）",
-            "Year(s): " + (", ".join(years) if years else "未选") + "\n"
-            "Season(s): " + (", ".join(seasons) if seasons else "未选") + "\n"
-            f"Subject: {subject_key}  ·  {subject_full}\n"
-            "Topic(s): " + (", ".join(topics) if topics else "未选")
-        )
+            if not years or not seasons or not comp_no or not topics:
+                messagebox.showwarning("提示", "请至少选择：年份(≥1)、季节(≥1)、科目(=1)、Topics(≥1)")
+                return
+
+            # 2) 调用生成器（是否随机可按需开关）
+            quiz_path, ans_path, stats = build_quiz_and_answers(
+                years=years,
+                seasons=seasons,
+                comp_no=str(comp_no),
+                topics=topics,
+                shuffle=False,   # 想随机就 True；题目与答案会按同一顺序
+                seed=None,
+            )
+
+            # 3) 结果提示
+            if not quiz_path:
+                messagebox.showinfo("结果", stats.get("msg", "未生成任何文件"))
+                return
+
+            msg = f"题目已生成：\n{stats['output_quiz']}\n\n"
+            if ans_path:
+                msg += f"答案已生成：\n{stats['output_answers']}\n\n"
+            else:
+                msg += "未生成答案PDF（未找到任何对应答案）。\n\n"
+            msg += f"匹配题目：{stats['matched_questions']}；题目页数：{stats['quiz_pages']}；答案页数：{stats['answer_pages']}\n"
+            if stats.get("missing_answers", 0):
+                msg += f"缺失答案：{stats['missing_answers']}（请检查 data/output_answers 的命名是否含 _Qn_）"
+            messagebox.showinfo("完成", msg)
+
+        except Exception as e:
+            messagebox.showerror("合并失败", f"{e}\n\n{traceback.format_exc()}")
 
 
 if __name__ == "__main__":
