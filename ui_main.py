@@ -1,4 +1,3 @@
-# ui_main.py
 import sys
 import subprocess
 import traceback
